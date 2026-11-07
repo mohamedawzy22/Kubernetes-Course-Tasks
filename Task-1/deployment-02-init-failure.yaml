@@ -1,0 +1,157 @@
+
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: nginx-timestamp
+  namespace: task-1
+
+spec:
+  replicas: 3
+
+  # Keep old Pods available during a rolling update.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+  selector:
+    matchLabels:
+      app: nginx-timestamp
+
+  template:
+    metadata:
+      labels:
+        app: nginx-timestamp
+
+    spec:
+      # Containers inside this Pod share the process namespace.
+      shareProcessNamespace: true
+
+      # Spread the Pods across the available Worker Nodes.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: nginx-timestamp
+
+      # 1. Init Container
+      
+      # 1. Init Container
+      initContainers:
+        - name: init-done
+          image: busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Intentional failure for testing"
+              exit 1
+
+      # 2. Application Containers
+      containers:
+
+        # Main Nginx Container
+        - name: nginx
+          image: nginx:stable-alpine
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+
+          command:
+            - /bin/sh
+            - -c
+
+          args:
+            - |
+              set -eu
+
+              printf 'hello in MLOPS MENA COMMUNITY : %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" \
+                > /usr/share/nginx/html/index.html
+
+              exec nginx -g 'daemon off;'
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 3
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+
+        # Sidecar Container
+        - name: time-updater
+          image: busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+
+          command:
+            - /bin/sh
+            - -c
+
+          args:
+            - |
+              set -eu
+
+              echo "time-updater started"
+
+              while true; do
+
+                nginx_pid=""
+
+                for proc in /proc/[0-9]*; do
+
+                  [ -r "$proc/comm" ] || continue
+
+                  process_name="$(cat "$proc/comm" 2>/dev/null || true)"
+
+                  [ "$process_name" = "nginx" ] || continue
+
+                  cmdline="$(tr '\000' ' ' < "$proc/cmdline" 2>/dev/null || true)"
+
+                  case "$cmdline" in
+                    *"nginx: master process"*)
+                      nginx_pid="${proc##*/}"
+                      break
+                      ;;
+                  esac
+
+                done
+
+                if [ -n "$nginx_pid" ]; then
+
+                  timestamp="$(date '+%Y-%m-%d %H:%M:%S')"
+
+                  printf 'hello in MLOPS MENA COMMUNITY : %s\n' "$timestamp" \
+                    > "/proc/${nginx_pid}/root/usr/share/nginx/html/index.html"
+
+                  echo "Updated index.html: ${timestamp}"
+
+                else
+                  echo "Waiting for Nginx master process..."
+                fi
+
+                sleep 5
+
+              done
+
+          resources:
+            requests:
+              cpu: 10m
+              memory: 8Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
